@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS appointments (
     appointment_date DATETIME NOT NULL,
     notes TEXT,
     status VARCHAR(20) DEFAULT 'pending',
+    rejection_reason TEXT DEFAULT NULL,
     created_by VARCHAR(50),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -73,22 +74,28 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 
 -- Insert default users
-INSERT INTO users (username, password, role) VALUES
+INSERT INTO users (username, password, role)
+VALUES
 ('admin', 'admin123', 'admin'),
 ('security', 'security123', 'security'),
 ('reception', 'reception123', 'reception');
 
 -- Insert default settings
 INSERT INTO settings (setting_key, setting_value)
-VALUES ('manager_email', 'manager@pidatacenters.com');
+VALUES
+('manager_email', 'manager@pidatacenters.com');
 
 -- Create application user
-CREATE USER IF NOT EXISTS 'visitor_app'@'localhost' IDENTIFIED BY 'REPLACE_WITH_STRONG_PASSWORD';
+CREATE USER IF NOT EXISTS 'visitor_app'@'localhost'
+IDENTIFIED BY 'REPLACE_WITH_STRONG_PASSWORD';
 
 GRANT ALL PRIVILEGES ON visitor_management.* TO 'visitor_app'@'localhost';
 
 FLUSH PRIVILEGES;
+
 EXIT;
+
+
 
 6. fetch the code from github to local server.
 
