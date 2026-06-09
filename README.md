@@ -18,7 +18,7 @@ installation steps:
 
    mysql -u root -p
 
-   -- Create database
+-- Create database
 CREATE DATABASE IF NOT EXISTS visitor_management;
 USE visitor_management;
 
