@@ -179,7 +179,7 @@ REPORT_TEMPLATE = '''
                     {% else %}
                         <div style="font-size: 60px;">📊</div>
                     {% endif %}
-                    <h2 class="login-title">Pi Data Centers Reports Portal Login</h2>
+                    <h2 class="login-title">Pi Datacenters Reports Portal Login</h2>
                     <p class="login-subtitle">Access Reports and Analytics</p>
                 </div>
                 <div id="loginAlert" class="alert"></div>

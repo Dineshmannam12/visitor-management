@@ -18,6 +18,11 @@ def serve_static(filename):
     return send_from_directory('static', filename)
 
 def send_email(to_email, subject, body):
+    """Send email using SMTP configuration"""
+    if not to_email or to_email == 'string':
+        print(f"⚠️ Invalid email address: {to_email}")
+        return False
+    
     try:
         msg = MIMEMultipart()
         msg['From'] = EMAIL_CONFIG['sender_email']
@@ -33,8 +38,56 @@ def send_email(to_email, subject, body):
         print(f"✅ Email sent to {to_email}")
         return True
     except Exception as e:
-        print(f"❌ Email error: {e}")
+        print(f"❌ Email error to {to_email}: {e}")
         return False
+
+def get_manager_email():
+    """Get manager email from settings"""
+    conn = get_db()
+    if conn:
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT setting_value FROM settings WHERE setting_key='manager_email'")
+            result = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            if result and result['setting_value'] and result['setting_value'] != 'string':
+                return result['setting_value']
+        except Exception as e:
+            print(f"Error getting manager email: {e}")
+    return None
+
+def get_all_admin_emails():
+    """Get all admin and manager emails for notifications"""
+    emails = []
+    
+    # Add manager email
+    manager_email = get_manager_email()
+    if manager_email:
+        emails.append(manager_email)
+    
+    # Get additional emails from settings
+    conn = get_db()
+    if conn:
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT setting_value FROM settings WHERE setting_key='additional_emails'")
+            result = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            if result and result['setting_value']:
+                additional = [e.strip() for e in result['setting_value'].split(',') if e.strip() and '@' in e and e.strip() != 'string']
+                emails.extend(additional)
+        except Exception as e:
+            print(f"Error getting additional emails: {e}")
+    
+    # Remove duplicates and invalid emails
+    valid_emails = []
+    for email in list(set(emails)):
+        if email and '@' in email and email != 'string':
+            valid_emails.append(email)
+    
+    return valid_emails
 
 ADMIN_TEMPLATE = '''
 <!DOCTYPE html>
@@ -42,7 +95,7 @@ ADMIN_TEMPLATE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pi Datacenters  Admin - Pi Datacenters</title>
+    <title>Pi Admin - PI Data Centers</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -145,7 +198,17 @@ ADMIN_TEMPLATE = '''
             border: 1px solid #ddd;
             border-radius: 5px;
         }
-        .alert { padding: 15px; border-radius: 8px; margin-bottom: 15px; display: none; }
+        .alert { 
+            padding: 15px; 
+            border-radius: 8px; 
+            margin-bottom: 15px; 
+            display: none;
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1000;
+            min-width: 300px;
+        }
         .alert-success { background: #d4edda; color: #155724; display: block; }
         .alert-error { background: #f8d7da; color: #721c24; display: block; }
         .logo-container {
@@ -167,6 +230,14 @@ ADMIN_TEMPLATE = '''
             color: #666;
             font-size: 14px;
         }
+        .rejection-reason {
+            background: #fff3cd;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            font-size: 12px;
+            color: #856404;
+        }
     </style>
 </head>
 <body>
@@ -175,11 +246,11 @@ ADMIN_TEMPLATE = '''
             <div class="card" style="max-width: 400px; margin: 50px auto;">
                 <div class="logo-container">
                     {% if logo_base64 %}
-                        <img src="{{ logo_base64 }}" alt="Pi Datacenters Logo" class="logo-img">
+                        <img src="{{ logo_base64 }}" alt="PI Data Centers Logo" class="logo-img">
                     {% else %}
                         <div style="font-size: 60px;">👑</div>
                     {% endif %}
-                    <h2 class="login-title">Pi Datacenters Admin Login</h2>
+                    <h2 class="login-title">Pi Admin Login</h2>
                     <p class="login-subtitle">Administrator Access Only</p>
                 </div>
                 <div id="loginAlert" class="alert"></div>
@@ -195,12 +266,12 @@ ADMIN_TEMPLATE = '''
 
     <div id="mainApp" style="display:none;">
         <div class="top-bar">
-            <div class="brand"><strong>Pi Datacenters - Admin Portal</strong></div>
+            <div class="brand"><strong>PI Data Centers - Admin Portal</strong></div>
             <span>👤 <span id="currentUser"></span></span>
             <button class="logout-btn" onclick="doLogout()">Logout</button>
         </div>
         <div class="container">
-            <h1 style="color: white;">Admin Service</h1>
+            <h1 style="color: white;">👑 Admin Service</h1>
             <div style="color: white; text-align: center; margin-bottom: 20px;">Approve/Reject Visitor Requests</div>
             
             <div class="tabs">
@@ -234,7 +305,7 @@ ADMIN_TEMPLATE = '''
             <div id="settingsTab" class="tab-content">
                 <div class="card">
                     <h2>⚙️ Email Settings</h2>
-                    <label>Manager Email:</label>
+                    <label>Manager Email (Primary):</label>
                     <input type="email" id="managerEmail" placeholder="manager@company.com">
                     <label>Additional Emails (comma separated):</label>
                     <textarea id="additionalEmails" rows="3" placeholder="email1@company.com, email2@company.com"></textarea>
@@ -245,6 +316,8 @@ ADMIN_TEMPLATE = '''
         </div>
     </div>
 
+    <div id="notificationAlert" class="alert" style="display:none;"></div>
+
     <script>
         let currentUser = null;
 
@@ -253,7 +326,13 @@ ADMIN_TEMPLATE = '''
             if (data) opts.body = JSON.stringify(data);
             try {
                 const res = await fetch(url, opts);
-                return await res.json();
+                const text = await res.text();
+                try {
+                    return JSON.parse(text);
+                } catch(e) {
+                    console.error('Invalid JSON:', text);
+                    return null;
+                }
             } catch(e) {
                 console.error('API Error:', e);
                 return null;
@@ -313,7 +392,7 @@ ADMIN_TEMPLATE = '''
                     🚗 ${escapeHtml(a.vehicle_number || 'N/A')}<br>
                     📝 ${escapeHtml(a.purpose)}<br>
                     ${a.meeting_with ? '👤 Meeting: ' + escapeHtml(a.meeting_with) + '<br>' : ''}
-                    📅 ${a.appointment_date}<br>
+                    📅 ${new Date(a.appointment_date).toLocaleString()}<br>
                     📝 Notes: ${escapeHtml(a.notes || 'N/A')}<br>
                     <span class="badge pending">PENDING</span><br>
                     <button class="btn-small btn-approve" onclick="approveAppt('${a.appointment_id || a.id}')">✅ Approve</button>
@@ -333,7 +412,7 @@ ADMIN_TEMPLATE = '''
                 <div class="visitor-item" style="border-left-color:#4caf50;">
                     <strong>${escapeHtml(a.name)}</strong><br>
                     📧 ${escapeHtml(a.email)} | 📞 ${escapeHtml(a.phone)}<br>
-                    📅 ${a.appointment_date}<br>
+                    📅 ${new Date(a.appointment_date).toLocaleString()}<br>
                     <span class="badge approved">APPROVED</span><br>
                     <button class="btn-small btn-undo" onclick="undoAppt('${a.appointment_id || a.id}')">↩ Undo</button>
                     <button class="btn-small btn-delete" onclick="deleteAppt('${a.appointment_id || a.id}')">🗑 Delete</button>
@@ -352,8 +431,10 @@ ADMIN_TEMPLATE = '''
                 <div class="visitor-item" style="border-left-color:#f44336;">
                     <strong>${escapeHtml(a.name)}</strong><br>
                     📧 ${escapeHtml(a.email)}<br>
-                    📅 ${a.appointment_date}<br>
-                    ❌ Reason: ${escapeHtml(a.rejection_reason || 'Not specified')}<br>
+                    📅 ${new Date(a.appointment_date).toLocaleString()}<br>
+                    <div class="rejection-reason">
+                        ❌ Rejection Reason: ${escapeHtml(a.rejection_reason || 'Not specified')}
+                    </div>
                     <span class="badge rejected">REJECTED</span><br>
                     <button class="btn-small btn-undo" onclick="undoAppt('${a.appointment_id || a.id}')">↩ Undo</button>
                     <button class="btn-small btn-delete" onclick="deleteAppt('${a.appointment_id || a.id}')">🗑 Delete</button>
@@ -363,36 +444,76 @@ ADMIN_TEMPLATE = '''
 
         async function approveAppt(id) {
             if (!confirm('Approve this request? The visitor will be notified via email.')) return;
+            showNotification('Processing approval...', 'info');
+            
             const result = await api('/api/appointments/' + id + '/status', 'PUT', { status: 'approved' });
             if (result && result.success) {
-                await api('/api/email/approval', 'POST', { appointment_id: id });
-                showAlert('pendingAlert', '✅ Approved! Visitor has been notified.', 'success');
+                const emailResult = await api('/api/email/approval', 'POST', { appointment_id: id });
+                if (emailResult && emailResult.success) {
+                    showNotification('✅ Approved! Visitor has been notified via email.', 'success');
+                } else {
+                    showNotification('✅ Approved! But email notification failed. Please check email settings.', 'warning');
+                }
                 loadAllData();
+            } else {
+                showNotification('❌ Approval failed. Please try again.', 'error');
             }
         }
 
         async function rejectAppt(id) {
             const reason = prompt('Please enter the reason for rejection:', 'Your request did not meet our approval criteria.');
-            if (reason === null) return;
-            if (!confirm('Reject this request? The visitor will be notified.')) return;
-            const result = await api('/api/appointments/' + id + '/status', 'PUT', { status: 'rejected', rejection_reason: reason });
+            if (reason === null || reason.trim() === '') {
+                showNotification('Rejection cancelled - reason is required', 'error');
+                return;
+            }
+            if (!confirm('Reject this request? The visitor and staff will be notified via email.')) return;
+            
+            showNotification('Processing rejection...', 'info');
+            
+            // First update the status
+            const result = await api('/api/appointments/' + id + '/status', 'PUT', { 
+                status: 'rejected', 
+                rejection_reason: reason 
+            });
+            
             if (result && result.success) {
-                await api('/api/email/rejection', 'POST', { appointment_id: id, reason: reason });
-                showAlert('pendingAlert', '❌ Rejected! Visitor has been notified.', 'error');
+                // Then send rejection emails
+                const emailResult = await api('/api/email/rejection', 'POST', { 
+                    appointment_id: id, 
+                    reason: reason 
+                });
+                
+                if (emailResult && emailResult.success) {
+                    showNotification('❌ Rejected! Visitor and staff have been notified via email.', 'success');
+                } else {
+                    showNotification('❌ Rejected! But email notification failed. Please check email settings.', 'warning');
+                }
                 loadAllData();
+            } else {
+                showNotification('❌ Failed to reject. Please try again. Error: ' + (result?.error || 'Unknown'), 'error');
             }
         }
 
         async function undoAppt(id) {
-            if (!confirm('Undo this action?')) return;
-            await api('/api/appointments/' + id + '/status', 'PUT', { status: 'pending' });
-            loadAllData();
+            if (!confirm('Undo this action? This will set the status back to pending.')) return;
+            const result = await api('/api/appointments/' + id + '/status', 'PUT', { status: 'pending' });
+            if (result && result.success) {
+                showNotification('✅ Status reset to pending!', 'success');
+                loadAllData();
+            } else {
+                showNotification('❌ Failed to undo. Please try again.', 'error');
+            }
         }
 
         async function deleteAppt(id) {
-            if (!confirm('Delete this appointment?')) return;
-            await api('/api/appointments/' + id, 'DELETE');
-            loadAllData();
+            if (!confirm('Delete this appointment permanently?')) return;
+            const result = await api('/api/appointments/' + id, 'DELETE');
+            if (result && result.success) {
+                showNotification('✅ Appointment deleted!', 'success');
+                loadAllData();
+            } else {
+                showNotification('❌ Failed to delete. Please try again.', 'error');
+            }
         }
 
         async function loadSettings() {
@@ -407,26 +528,17 @@ ADMIN_TEMPLATE = '''
             const additionalEmails = document.getElementById('additionalEmails').value.trim();
             await api('/api/settings/manager_email', 'POST', { value: managerEmail });
             await api('/api/settings/additional_emails', 'POST', { value: additionalEmails });
-            showAlert('settingsAlert', '✅ Settings saved successfully!', 'success');
-            setTimeout(() => {
-                const alertDiv = document.getElementById('settingsAlert');
-                alertDiv.className = 'alert';
-                alertDiv.style.display = 'none';
-            }, 3000);
+            showNotification('✅ Settings saved successfully!', 'success');
         }
 
-        function showAlert(id, msg, type) {
-            const alertDiv = document.getElementById(id);
-            if (alertDiv) {
-                alertDiv.textContent = msg;
-                alertDiv.className = 'alert alert-' + type;
-                setTimeout(() => {
-                    alertDiv.className = 'alert';
-                    alertDiv.style.display = 'none';
-                }, 4000);
-            } else {
-                alert(msg);
-            }
+        function showNotification(msg, type) {
+            const alertDiv = document.getElementById('notificationAlert');
+            alertDiv.textContent = msg;
+            alertDiv.className = 'alert alert-' + type;
+            alertDiv.style.display = 'block';
+            setTimeout(() => {
+                alertDiv.style.display = 'none';
+            }, 5000);
         }
 
         function escapeHtml(text) {
@@ -499,7 +611,8 @@ def get_appointments():
                     a['appointment_date'] = str(a['appointment_date'])
             return jsonify(apps)
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Error getting appointments: {e}")
+            return jsonify([])
     return jsonify([])
 
 @app.route('/api/appointments/<aid>/status', methods=['PUT'])
@@ -507,24 +620,41 @@ def update_appointment_status(aid):
     data = request.json
     new_status = data.get('status')
     rejection_reason = data.get('rejection_reason', '')
+    
+    print(f"📝 Updating appointment {aid} to status: {new_status}")
+    if new_status == 'rejected':
+        print(f"   Rejection reason: {rejection_reason}")
+    
     conn = get_db()
     if conn:
         try:
             cursor = conn.cursor()
             if new_status == 'rejected':
-                cursor.execute("UPDATE appointments SET status=%s, rejection_reason=%s WHERE appointment_id=%s OR id=%s", 
+                cursor.execute("""UPDATE appointments 
+                               SET status=%s, rejection_reason=%s 
+                               WHERE appointment_id=%s OR id=%s""", 
                              (new_status, rejection_reason, aid, aid))
             else:
-                cursor.execute("UPDATE appointments SET status=%s WHERE appointment_id=%s OR id=%s", 
+                cursor.execute("""UPDATE appointments 
+                               SET status=%s 
+                               WHERE appointment_id=%s OR id=%s""", 
                              (new_status, aid, aid))
+            
             conn.commit()
+            affected = cursor.rowcount
             cursor.close()
             conn.close()
-            return jsonify({'success': True})
+            
+            if affected > 0:
+                print(f"✅ Appointment {aid} updated successfully to {new_status}")
+                return jsonify({'success': True})
+            else:
+                print(f"❌ Appointment {aid} not found")
+                return jsonify({'success': False, 'error': 'Appointment not found'}), 404
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"❌ Error updating appointment: {e}")
             return jsonify({'error': str(e)}), 500
-    return jsonify({'success': True})
+    return jsonify({'success': False, 'error': 'Database connection failed'}), 500
 
 @app.route('/api/appointments/<aid>', methods=['DELETE'])
 def delete_appointment(aid):
@@ -538,7 +668,7 @@ def delete_appointment(aid):
             conn.close()
             return jsonify({'success': True})
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Error deleting appointment: {e}")
             return jsonify({'error': str(e)}), 500
     return jsonify({'success': True})
 
@@ -554,19 +684,85 @@ def email_approval():
             appt = cursor.fetchone()
             cursor.close()
             conn.close()
-            if appt:
-                meeting_text = f"\n- Meeting With: {appt.get('meeting_with', 'N/A')}" if appt.get('meeting_with') else ''
-                send_email(appt['email'], f"✅ Your Visit to PI Data Centers has been APPROVED!", 
-                          f"Dear {appt['name']},\n\nYour visit request has been APPROVED.\n\nDetails:\n- Date: {appt['appointment_date']}\n- Purpose: {appt['purpose']}{meeting_text}\n\nPlease bring valid ID.\n\nPI Data Centers Management")
+            
+            if not appt:
+                return jsonify({'success': False, 'error': 'Appointment not found'}), 404
+            
+            meeting_text = f"\n- Meeting With: {appt.get('meeting_with', 'N/A')}" if appt.get('meeting_with') else ''
+            
+            # Send email to visitor
+            visitor_subject = f"✅ Your Visit to {COMPANY_NAME} has been APPROVED!"
+            visitor_body = f"""
+Dear {appt['name']},
+
+We are pleased to inform you that your visit request to {COMPANY_NAME} has been APPROVED.
+
+📋 Appointment Details:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Name: {appt['name']}
+• Email: {appt['email']}
+• Phone: {appt['phone']}
+• Purpose: {appt['purpose']}{meeting_text}
+• Date & Time: {appt['appointment_date']}
+• Vehicle: {appt.get('vehicle_number', 'N/A')}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ Status: APPROVED
+
+Important Instructions:
+1. Please bring a valid government-issued ID
+2. Report to the security desk upon arrival
+3. Security will check you in using your name/email
+
+Thank you for choosing {COMPANY_NAME}.
+
+Best regards,
+{COMPANY_NAME} Management
+"""
+            send_email(appt['email'], visitor_subject, visitor_body)
+            
+            # Also notify managers about approval
+            admin_emails = get_all_admin_emails()
+            if admin_emails:
+                admin_subject = f"✅ Appointment APPROVED - {appt['name']}"
+                admin_body = f"""
+APPOINTMENT APPROVED ALERT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The following appointment has been APPROVED:
+
+📋 Visitor Details:
+• Name: {appt['name']}
+• Email: {appt['email']}
+• Phone: {appt['phone']}
+• Purpose: {appt['purpose']}{meeting_text}
+• Date & Time: {appt['appointment_date']}
+
+✅ Status: APPROVED
+
+This visitor has been notified and will check in at security.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{COMPANY_NAME} Visitor Management System
+"""
+                for email in admin_emails:
+                    send_email(email, admin_subject, admin_body)
+            
+            return jsonify({'success': True})
         except Exception as e:
-            print(f"Email error: {e}")
-    return jsonify({'success': True})
+            print(f"Approval email error: {e}")
+            return jsonify({'error': str(e)}), 500
+    return jsonify({'success': False}), 500
 
 @app.route('/api/email/rejection', methods=['POST'])
 def email_rejection():
     data = request.json
     aid = data.get('appointment_id', '')
-    reason = data.get('reason', 'Not specified')
+    reason = data.get('reason', 'Your request did not meet our approval criteria.')
+    
+    print(f"📧 Sending rejection email for appointment: {aid}")
+    print(f"   Reason: {reason}")
+    
     conn = get_db()
     if conn:
         try:
@@ -575,12 +771,90 @@ def email_rejection():
             appt = cursor.fetchone()
             cursor.close()
             conn.close()
-            if appt:
-                send_email(appt['email'], f"❌ Your Visit to PI Data Centers has been REJECTED", 
-                          f"Dear {appt['name']},\n\nYour visit request has been REJECTED.\n\nReason: {reason}\n\nContact us for more information.\n\nPI Data Centers Management")
+            
+            if not appt:
+                print(f"❌ Appointment not found: {aid}")
+                return jsonify({'success': False, 'error': 'Appointment not found'}), 404
+            
+            print(f"✅ Found appointment for: {appt['name']} ({appt['email']})")
+            
+            meeting_text = f"\n- Meeting With: {appt.get('meeting_with', 'N/A')}" if appt.get('meeting_with') else ''
+            
+            # 1. Send rejection email to the visitor
+            visitor_subject = f"❌ Your Visit to {COMPANY_NAME} has been REJECTED"
+            visitor_body = f"""
+Dear {appt['name']},
+
+We regret to inform you that your visit request to {COMPANY_NAME} has been REJECTED.
+
+📋 Request Details:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Name: {appt['name']}
+• Email: {appt['email']}
+• Phone: {appt['phone']}
+• Purpose: {appt['purpose']}{meeting_text}
+• Date & Time: {appt['appointment_date']}
+• Vehicle: {appt.get('vehicle_number', 'N/A')}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+❌ Rejection Reason:
+{reason}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+If you believe this is an error or need to reschedule, please contact us.
+
+We appreciate your understanding.
+
+Best regards,
+{COMPANY_NAME} Management
+"""
+            visitor_email_sent = send_email(appt['email'], visitor_subject, visitor_body)
+            
+            # 2. Send notification to all managers/admins about rejection
+            admin_emails = get_all_admin_emails()
+            
+            if admin_emails:
+                admin_subject = f"❌ Appointment REJECTED - {appt['name']}"
+                admin_body = f"""
+APPOINTMENT REJECTED ALERT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The following appointment has been REJECTED:
+
+📋 Visitor Details:
+• Name: {appt['name']}
+• Email: {appt['email']}
+• Phone: {appt['phone']}
+• Purpose: {appt['purpose']}{meeting_text}
+• Date & Time: {appt['appointment_date']}
+
+❌ Rejection Reason:
+{reason}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The visitor has been notified of this decision.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{COMPANY_NAME} Visitor Management System
+"""
+                for email in admin_emails:
+                    send_email(email, admin_subject, admin_body)
+            
+            return jsonify({
+                'success': True, 
+                'visitor_notified': visitor_email_sent,
+                'admin_notified': len(admin_emails) > 0
+            })
+            
         except Exception as e:
-            print(f"Email error: {e}")
-    return jsonify({'success': True})
+            print(f"❌ Rejection email error: {e}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({'error': str(e)}), 500
+    
+    return jsonify({'success': False, 'error': 'Database connection failed'}), 500
 
 @app.route('/api/settings/<key>', methods=['GET'])
 def get_setting(key):
@@ -592,33 +866,41 @@ def get_setting(key):
             result = cursor.fetchone()
             cursor.close()
             conn.close()
-            if result:
+            if result and result['setting_value']:
                 return jsonify({'value': result['setting_value']})
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Error getting setting: {e}")
     return jsonify({'value': None})
 
 @app.route('/api/settings/<key>', methods=['POST'])
 def set_setting(key):
     data = request.json
+    value = data.get('value', '')
+    
+    # Don't save invalid values
+    if value == 'string' or value == 'null' or value == 'undefined':
+        value = ''
+    
     conn = get_db()
     if conn:
         try:
             cursor = conn.cursor()
-            cursor.execute("UPDATE settings SET setting_value=%s WHERE setting_key=%s", (data['value'], key))
+            cursor.execute("UPDATE settings SET setting_value=%s WHERE setting_key=%s", (value, key))
             if cursor.rowcount == 0:
-                cursor.execute("INSERT INTO settings (setting_key, setting_value) VALUES (%s,%s)", (key, data['value']))
+                cursor.execute("INSERT INTO settings (setting_key, setting_value) VALUES (%s,%s)", (key, value))
             conn.commit()
             cursor.close()
             conn.close()
             return jsonify({'success': True})
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Error setting setting: {e}")
             return jsonify({'error': str(e)}), 500
     return jsonify({'success': False}), 500
 
 if __name__ == '__main__':
+    print("=" * 60)
     print("👑 Admin Service running on port 8082")
     print("   URL: http://localhost:8082")
     print("   Login: admin / admin123")
+    print("=" * 60)
     app.run(host='0.0.0.0', port=8082, debug=False)
