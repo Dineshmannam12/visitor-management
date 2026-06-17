@@ -1,4 +1,3 @@
-# Shared configuration for all services
 import os
 
 DB_CONFIG = {

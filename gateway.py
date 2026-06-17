@@ -1,10 +1,54 @@
-from flask import Flask, request, jsonify, render_template_string, redirect
+from flask import Flask, render_template_string, redirect, jsonify, request, send_from_directory
 from flask_cors import CORS
 from datetime import datetime
-from config import PI_LOGO_SVG
+import base64
+import os
+from db_utils import get_db
 
 app = Flask(__name__)
+app.secret_key = 'gateway_secret_key_2024'
 CORS(app)
+
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(os.path.join(app.root_path, 'static'), 'logo.png', mimetype='image/png')
+
+LOGO_PATH = 'static/logo.png'
+BACKGROUND_PATH = 'static/background.jpg'  # Add your background image here
+
+def get_logo_base64():
+    if os.path.exists(LOGO_PATH):
+        with open(LOGO_PATH, 'rb') as f:
+            logo_data = base64.b64encode(f.read()).decode('utf-8')
+            ext = LOGO_PATH.split('.')[-1].lower()
+            mime_type = 'image/png' if ext == 'png' else 'image/jpeg' if ext in ['jpg', 'jpeg'] else 'image/png'
+            return f'data:{mime_type};base64,{logo_data}'
+    return None
+
+def get_background_base64():
+    if os.path.exists(BACKGROUND_PATH):
+        with open(BACKGROUND_PATH, 'rb') as f:
+            bg_data = base64.b64encode(f.read()).decode('utf-8')
+            ext = BACKGROUND_PATH.split('.')[-1].lower()
+            mime_type = 'image/png' if ext == 'png' else 'image/jpeg' if ext in ['jpg', 'jpeg'] else 'image/png'
+            return f'data:{mime_type};base64,{bg_data}'
+    return None
+
+def get_user_role(username):
+    user_roles = {
+        'security': 'security',
+        'admin': 'admin',
+        'reception': 'reception'
+    }
+    return user_roles.get(username.lower(), None)
+
+# Service URLs (internal)
+SERVICES = {
+    'security': 'http://127.0.0.1:8081',
+    'admin': 'http://127.0.0.1:8082',
+    'visitor': 'http://127.0.0.1:8083',
+    'report': 'http://127.0.0.1:8084'
+}
 
 GATEWAY_TEMPLATE = '''
 <!DOCTYPE html>
@@ -12,250 +56,265 @@ GATEWAY_TEMPLATE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pi Data Centers - Visitor Management System</title>
+    <title>Pi Datacenters - Visitor Management System</title>
+    <link rel="icon" type="image/png" href="/favicon.ico">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
             min-height: 100vh;
+            background-image: url('{{ background_base64 }}');
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            background-attachment: fixed;
+            position: relative;
+        }
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 0;
         }
         .header {
-            background: rgba(0,0,0,0.8);
+            position: relative;
+            z-index: 1;
             color: white;
-            padding: 30px 20px;
+            padding: 40px 20px 20px;
             text-align: center;
         }
         .header h1 {
-            font-size: 36px;
-            margin-bottom: 10px;
+            font-size: 42px;
+            margin-bottom: 5px;
+            text-shadow: 0 2px 20px rgba(0,0,0,0.5);
+            letter-spacing: 2px;
+            font-weight: 700;
         }
         .header p {
-            font-size: 16px;
+            font-size: 18px;
             opacity: 0.9;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+            letter-spacing: 1px;
         }
         .container {
+            position: relative;
+            z-index: 1;
             max-width: 1200px;
             margin: 0 auto;
-            padding: 40px 20px;
+            padding: 20px 20px 40px;
         }
-        .service-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 25px;
-            margin-top: 30px;
+        .login-container {
+            max-width: 420px;
+            margin: 0 auto 30px;
         }
-        .service-card {
-            background: white;
-            border-radius: 15px;
-            padding: 30px;
+        .card {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 35px 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        .logo-container {
             text-align: center;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 20px;
         }
-        .service-card:hover {
-            transform: translateY(-10px);
-            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
-        }
-        .service-icon {
+        .logo-img {
             width: 80px;
             height: 80px;
-            margin: 0 auto 20px;
-        }
-        .service-icon img {
-            width: 100%;
-            height: 100%;
-            border-radius: 50%;
-        }
-        .service-card h3 {
-            color: #1e3c72;
+            object-fit: contain;
             margin-bottom: 10px;
-            font-size: 24px;
+            filter: drop-shadow(0 2px 10px rgba(0,0,0,0.1));
         }
-        .service-card p {
-            color: #666;
-            margin-bottom: 20px;
-            line-height: 1.5;
-            font-size: 14px;
-        }
-        .badge {
-            display: inline-block;
-            padding: 5px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
-            margin-top: 10px;
-        }
-        .security-badge { background: #2196F3; color: white; }
-        .admin-badge { background: #f44336; color: white; }
-        .visitor-badge { background: #4caf50; color: white; }
-        .report-badge { background: #ff9800; color: white; }
-        .status {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            background: rgba(0,0,0,0.8);
-            color: white;
-            padding: 10px 15px;
-            border-radius: 10px;
-            font-size: 12px;
-            z-index: 1000;
-        }
-        .service-status {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            margin-right: 5px;
-        }
-        .online { background: #4caf50; }
-        .offline { background: #f44336; }
-        .login-demo {
-            background: rgba(255,255,255,0.1);
-            padding: 15px;
-            border-radius: 10px;
-            margin-top: 40px;
+        .login-title {
+            color: #1e3c72;
+            font-size: 26px;
+            margin-bottom: 8px;
             text-align: center;
+            font-weight: 700;
         }
-        .login-demo p {
+        .login-subtitle {
+            color: #666;
+            font-size: 14px;
+            text-align: center;
+            margin-bottom: 25px;
+        }
+        input {
+            width: 100%;
+            padding: 14px 16px;
+            margin: 10px 0;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            font-size: 14px;
+            background: rgba(255,255,255,0.9);
+            transition: all 0.3s ease;
+        }
+        input:focus {
+            outline: none;
+            border-color: #1e3c72;
+            box-shadow: 0 0 0 4px rgba(30, 60, 114, 0.1);
+            background: white;
+        }
+        input::placeholder {
+            color: #999;
+        }
+        button {
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
             color: white;
+            padding: 14px 24px;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            width: 100%;
+            margin-top: 10px;
+            transition: all 0.3s ease;
+            letter-spacing: 0.5px;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(30, 60, 114, 0.3);
+        }
+        .alert {
+            padding: 12px 16px;
+            border-radius: 10px;
+            margin-bottom: 15px;
+            display: none;
             font-size: 14px;
         }
-        .login-demo code {
-            background: rgba(0,0,0,0.3);
-            padding: 5px 10px;
-            border-radius: 5px;
-            margin: 0 5px;
+        .alert-error {
+            background: #f8d7da;
+            color: #721c24;
+            display: block;
+            border-left: 4px solid #dc3545;
+        }
+        .quick-links {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 12px;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+        }
+        .quick-link-btn {
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: white;
+            text-align: center;
+            padding: 14px;
+            border-radius: 12px;
+            text-decoration: none;
+            font-weight: 600;
+            display: block;
+            transition: all 0.3s ease;
+            font-size: 15px;
+            letter-spacing: 0.5px;
+        }
+        .quick-link-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(30, 60, 114, 0.3);
+        }
+        .quick-link-btn.visitor {
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+        }
+        .footer {
+            position: relative;
+            z-index: 1;
+            text-align: center;
+            padding: 20px;
+            color: rgba(255,255,255,0.8);
+            font-size: 13px;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+        }
+        .footer a {
+            color: rgba(255,255,255,0.9);
+            text-decoration: none;
         }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🏢 Pi Data Centers</h1>
-        <p>Visitor Management System - Microservices Architecture</p>
+        <h1>Pi Datacenters</h1>
+        <p>Visitor Management System</p>
     </div>
-    
+
     <div class="container">
-        <div class="service-grid">
-            <div class="service-card" onclick="openService('security')">
-                <div class="service-icon">
-                    <img src="{{ logo }}" alt="PI Logo">
+        <div class="login-container">
+            <div class="card">
+                <div class="logo-container">
+                    {% if logo_base64 %}
+                        <img src="{{ logo_base64 }}" alt="PI Data Centers Logo" class="logo-img">
+                    {% endif %}
+                    <h2 class="login-title">Welcome to Pi Datacenters</h2>
+                    <p class="login-subtitle">Enter your username to access your portal</p>
                 </div>
-                <h3>Pi Security Login</h3>
-                <p>Check-in / Check-out visitors<br>View approved appointments<br>Cannot modify approvals</p>
-                <span class="badge security-badge">Port 8081</span>
-                <div style="margin-top: 10px;">
-                    <span class="service-status" id="security-status"></span>
-                    <span id="security-status-text">Checking...</span>
-                </div>
-            </div>
-            
-            <div class="service-card" onclick="openService('admin')">
-                <div class="service-icon">
-                    <img src="{{ logo }}" alt="PI Logo">
-                </div>
-                <h3>Pi Admin Login</h3>
-                <p>Approve/Reject appointments<br>Full system management<br>Email notifications</p>
-                <span class="badge admin-badge">Port 8082</span>
-                <div style="margin-top: 10px;">
-                    <span class="service-status" id="admin-status"></span>
-                    <span id="admin-status-text">Checking...</span>
+
+                <div id="alert" class="alert"></div>
+
+                <input type="text" id="username" placeholder="Enter your username" autocomplete="off">
+                <button onclick="doLogin()">Sign In</button>
+
+                <div class="quick-links">
+                    <a href="/visitor/" class="quick-link-btn visitor">📝 Pre-Visitor Registration</a>
                 </div>
             </div>
-            
-            <div class="service-card" onclick="openService('visitor')">
-                <div class="service-icon">
-                    <img src="{{ logo }}" alt="PI Logo">
-                </div>
-                <h3>Visitor Pre-Registration</h3>
-                <p>Pre-register your visit<br>Check appointment status<br>Self-service portal</p>
-                <span class="badge visitor-badge">Port 8083</span>
-                <div style="margin-top: 10px;">
-                    <span class="service-status" id="visitor-status"></span>
-                    <span id="visitor-status-text">Checking...</span>
-                </div>
-            </div>
-            
-            <div class="service-card" onclick="openService('report')">
-                <div class="service-icon">
-                    <img src="{{ logo }}" alt="PI Logo">
-                </div>
-                <h3>Reports Portal Login</h3>
-                <p>View reports and analytics<br>Export data<br>Email reports</p>
-                <span class="badge report-badge">Port 8084</span>
-                <div style="margin-top: 10px;">
-                    <span class="service-status" id="report-status"></span>
-                    <span id="report-status-text">Checking...</span>
-                </div>
-            </div>
-        </div>
-        
-        <div class="login-demo">
-            <p>🔐 Demo Credentials:</p>
-            <p>Security: <code>security / security123</code> | Admin: <code>admin / admin123</code> | Reports: <code>reporter / reporter123</code></p>
         </div>
     </div>
-    
-    <div class="status">
-        <strong>System Status</strong><br>
-        <span id="system-status">Loading...</span>
+
+    <div class="footer">
+        &copy; 2026 Pi Datacenters. All rights reserved.
     </div>
 
     <script>
-        async function checkService(service, port) {
+        async function doLogin() {
+            const username = document.getElementById('username').value.trim();
+            const alertDiv = document.getElementById('alert');
+
+            if (!username) {
+                alertDiv.textContent = 'Please enter your username';
+                alertDiv.className = 'alert alert-error';
+                return;
+            }
+
+            alertDiv.style.display = 'none';
+
             try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 3000);
-                const response = await fetch(`http://localhost:${port}/api/health`, { signal: controller.signal });
-                clearTimeout(timeoutId);
-                return response.ok;
-            } catch(e) {
-                return false;
-            }
-        }
-        
-        async function updateServiceStatus() {
-            const services = [
-                {name: 'security', port: 8081},
-                {name: 'admin', port: 8082},
-                {name: 'visitor', port: 8083},
-                {name: 'report', port: 8084}
-            ];
-            
-            let allOnline = true;
-            
-            for (const service of services) {
-                const isOnline = await checkService(service.name, service.port);
-                const statusSpan = document.getElementById(`${service.name}-status`);
-                const textSpan = document.getElementById(`${service.name}-status-text`);
-                
-                if (isOnline) {
-                    statusSpan.className = 'service-status online';
-                    textSpan.textContent = 'Online';
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    if (result.role === 'admin') {
+                        window.location.href = '/admin/';
+                    } else if (result.role === 'security') {
+                        window.location.href = '/security/';
+                    } else if (result.role === 'reception') {
+                        window.location.href = '/security/';
+                    }
                 } else {
-                    statusSpan.className = 'service-status offline';
-                    textSpan.textContent = 'Offline';
-                    allOnline = false;
+                    alertDiv.textContent = result.message || 'Invalid username';
+                    alertDiv.className = 'alert alert-error';
                 }
-            }
-            
-            const systemStatus = document.getElementById('system-status');
-            if (allOnline) {
-                systemStatus.innerHTML = '✅ All services running';
-                systemStatus.style.color = '#4caf50';
-            } else {
-                systemStatus.innerHTML = '⚠️ Some services are offline';
-                systemStatus.style.color = '#ff9800';
+            } catch (error) {
+                alertDiv.textContent = 'Login failed. Please try again.';
+                alertDiv.className = 'alert alert-error';
             }
         }
-        
-        function openService(service) {
-            window.open(`http://localhost:${service === 'security' ? 8081 : service === 'admin' ? 8082 : service === 'visitor' ? 8083 : 8084}`, '_blank');
-        }
-        
-        updateServiceStatus();
-        setInterval(updateServiceStatus, 10000);
+
+        document.getElementById('username').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                doLogin();
+            }
+        });
     </script>
 </body>
 </html>
@@ -263,35 +322,65 @@ GATEWAY_TEMPLATE = '''
 
 @app.route('/')
 def index():
-    return render_template_string(GATEWAY_TEMPLATE, logo=PI_LOGO_SVG)
+    logo_base64 = get_logo_base64()
+    background_base64 = get_background_base64()
+    return render_template_string(GATEWAY_TEMPLATE, logo_base64=logo_base64, background_base64=background_base64)
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    data = request.json
+    username = data.get('username')
+
+    if not username:
+        return jsonify({'success': False, 'message': 'Username required'})
+
+    role = get_user_role(username)
+
+    if role:
+        return jsonify({'success': True, 'username': username, 'role': role})
+    else:
+        return jsonify({'success': False, 'message': 'Invalid username. Valid usernames: admin, security, reception'})
 
 @app.route('/api/health')
 def health():
     return jsonify({'status': 'healthy', 'service': 'gateway', 'timestamp': datetime.now().isoformat()})
 
-@app.route('/security')
-def security_portal():
-    return redirect('http://localhost:8081')
+# Proxy routes for services
+@app.route('/security/')
+@app.route('/security/<path:path>')
+def security_portal(path=''):
+    if path:
+        return redirect(f'{SERVICES["security"]}/{path}')
+    return redirect(SERVICES['security'])
 
-@app.route('/admin')
-def admin_portal():
-    return redirect('http://localhost:8082')
+@app.route('/admin/')
+@app.route('/admin/<path:path>')
+def admin_portal(path=''):
+    if path:
+        return redirect(f'{SERVICES["admin"]}/{path}')
+    return redirect(SERVICES['admin'])
 
-@app.route('/visitor')
-def visitor_portal():
-    return redirect('http://localhost:8083')
+@app.route('/visitor/')
+@app.route('/visitor/<path:path>')
+def visitor_portal(path=''):
+    if path:
+        return redirect(f'{SERVICES["visitor"]}/{path}')
+    return redirect(SERVICES['visitor'])
 
-@app.route('/report')
-def report_portal():
-    return redirect('http://localhost:8084')
+@app.route('/report/')
+@app.route('/report/<path:path>')
+def report_portal(path=''):
+    if path:
+        return redirect(f'{SERVICES["report"]}/{path}')
+    return redirect(SERVICES['report'])
 
 def redirect(url):
     from flask import redirect as flask_redirect
     return flask_redirect(url)
 
 if __name__ == '__main__':
-    from db_utils import init_db
-    init_db()
+    print("=" * 60)
     print("🚪 API Gateway running on port 8080")
-    print("   Gateway URL: http://localhost:8080")
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    print("   URL: http://127.0.0.1:8080")
+    print("=" * 60)
+    app.run(host='127.0.0.1', port=8080, debug=False)
